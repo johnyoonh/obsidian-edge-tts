@@ -63,6 +63,7 @@ export interface EdgeTTSPluginSettings {
   queueManagerPosition: { x: number; y: number } | null;
   autoPauseOnWindowBlur: boolean;
   enableTextHighlight: boolean;
+  readFromCursorByDefault: boolean;
 
   // Experimental and mobile-specific features
   enableExperimentalFeatures: boolean;
@@ -166,6 +167,7 @@ export const DEFAULT_SETTINGS: EdgeTTSPluginSettings = {
   queueManagerPosition: null,
   autoPauseOnWindowBlur: false,
   enableTextHighlight: true,
+  readFromCursorByDefault: false,
 
   // Experimental and mobile-specific features
   enableExperimentalFeatures: false,
@@ -200,10 +202,24 @@ export class EdgeTTSPluginSettingTab extends PluginSettingTab {
 
     inbetweenInfo.appendChild(infoText)
 
+    if (Platform.isIosApp) {
+      const iosNativeSpeechInfo = containerEl.createEl('div', {
+        cls: 'edge-tts-info-div'
+      });
+      const iosNativeSpeechText = document.createElement('p');
+      iosNativeSpeechText.style.fontSize = '13px';
+      iosNativeSpeechText.style.color = 'var(--text-muted)';
+      iosNativeSpeechText.innerHTML = `
+        <strong>iOS note:</strong> Obsidian iOS uses native device speech for playback.
+        Edge voice selections are used only as a language/locale hint when choosing an iOS voice.
+      `;
+      iosNativeSpeechInfo.appendChild(iosNativeSpeechText);
+    }
+
     // Dropdown for top voices
     new Setting(containerEl)
       .setName('Select voice')
-      .setDesc('Choose from the top voices.')
+      .setDesc(Platform.isIosApp ? 'Choose an Edge voice. On iOS, this is used as a language/locale hint for native speech.' : 'Choose from the top voices.')
       .setClass('default-style')
       .addDropdown(dropdown => {
         TOP_VOICES.forEach(voice => {
@@ -223,6 +239,7 @@ export class EdgeTTSPluginSettingTab extends PluginSettingTab {
     patternFragment.append('(OPTIONAL) Enter custom voice. Visit ');
     patternFragment.append(link);
     patternFragment.append(' for list of options. ');
+    patternFragment.append(Platform.isIosApp ? 'On iOS, this is used as a language/locale hint for native speech. ' : '');
     patternFragment.append('Leave empty to use the selected voice above.');
 
     // Text input for custom voice
@@ -360,6 +377,17 @@ export class EdgeTTSPluginSettingTab extends PluginSettingTab {
         toggle.setValue(this.plugin.settings.enableTextHighlight);
         toggle.onChange(async (value) => {
           this.plugin.settings.enableTextHighlight = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName('Start reading from cursor by default')
+      .setDesc('When no text is selected, Read note aloud starts at the cursor instead of the beginning of the note.')
+      .addToggle(toggle => {
+        toggle.setValue(this.plugin.settings.readFromCursorByDefault);
+        toggle.onChange(async (value) => {
+          this.plugin.settings.readFromCursorByDefault = value;
           await this.plugin.saveSettings();
         });
       });
@@ -914,4 +942,4 @@ export class EdgeTTSPluginSettingTab extends PluginSettingTab {
     // Legacy ampersand escaping setting removed - edge-tts-universal handles XML escaping internally
     // Legacy chunk size setting removed - chunking is now fixed at 4096 bytes due to API limits
   }
-} 
+}
