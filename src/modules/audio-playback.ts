@@ -119,6 +119,7 @@ export class AudioPlaybackManager {
     this.app = app;
     this.audioElement = new Audio();
     this.audioElement.preload = 'auto';
+    this.audioElement.playbackRate = this.normalizePlaybackSpeed(this.settings.playbackSpeed);
     this.setupAudioEventListeners();
     this.setupAutoPauseListeners();
     this.initializeMediaSession();
@@ -798,6 +799,7 @@ export class AudioPlaybackManager {
     this.isStreamingWithMSE = useMSE;
 
     this.isPaused = false; // Reset isPaused for the new playback session
+    this.audioElement.playbackRate = this.normalizePlaybackSpeed(this.settings.playbackSpeed);
     this.completeMp3BufferArray = [];
     this.mseAudioQueue = [];
     this.isAppendingBuffer = false;
@@ -1632,9 +1634,14 @@ export class AudioPlaybackManager {
    */
   updateSettings(settings: EdgeTTSPluginSettings): void {
     this.settings = settings;
+    this.audioElement.playbackRate = this.normalizePlaybackSpeed(this.settings.playbackSpeed);
 
     // Re-initialize Media Session if experimental features were toggled
     this.initializeMediaSession();
+  }
+
+  private normalizePlaybackSpeed(speed: number): number {
+    return Math.max(0.5, Math.min(2, Number.isFinite(speed) ? speed : 1));
   }
 
   /**

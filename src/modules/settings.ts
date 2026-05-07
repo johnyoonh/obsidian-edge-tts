@@ -15,6 +15,7 @@ export interface EdgeTTSPluginSettings {
   selectedVoice: string;
   customVoice: string;
   playbackSpeed: number;
+  playbackSpeedOptions: number[];
 
   showNotices: boolean;
   showStatusBarButton: boolean;
@@ -119,6 +120,7 @@ export const DEFAULT_SETTINGS: EdgeTTSPluginSettings = {
   selectedVoice: 'en-US-AvaNeural',
   customVoice: '',
   playbackSpeed: 1.0,
+  playbackSpeedOptions: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2],
 
   showNotices: true,
   showStatusBarButton: true,
@@ -268,6 +270,21 @@ export class EdgeTTSPluginSettingTab extends PluginSettingTab {
         });
         slider.setDynamicTooltip();
         slider.showTooltip();
+      });
+
+    new Setting(containerEl)
+      .setName('Floating player speed options')
+      .setDesc('Comma-separated playback speeds to show in the floating player popup. Values must be between 0.5 and 2.0.')
+      .addText(text => {
+        text.setPlaceholder('0.5, 0.75, 1, 1.25, 1.5, 1.75, 2');
+        text.setValue(this.plugin.settings.playbackSpeedOptions.join(', '));
+        text.onChange(async (value) => {
+          const speeds = this.parsePlaybackSpeedOptions(value);
+          if (speeds.length === 0) return;
+
+          this.plugin.settings.playbackSpeedOptions = speeds;
+          await this.plugin.saveSettings();
+        });
       });
 
     // Notice toggle setting
@@ -941,5 +958,15 @@ export class EdgeTTSPluginSettingTab extends PluginSettingTab {
 
     // Legacy ampersand escaping setting removed - edge-tts-universal handles XML escaping internally
     // Legacy chunk size setting removed - chunking is now fixed at 4096 bytes due to API limits
+  }
+
+  private parsePlaybackSpeedOptions(value: string): number[] {
+    const speeds = value
+      .split(/[\s,]+/u)
+      .map(part => Number(part.trim()))
+      .filter(speed => Number.isFinite(speed) && speed >= 0.5 && speed <= 2)
+      .map(speed => Math.round(speed * 100) / 100);
+
+    return Array.from(new Set(speeds)).sort((a, b) => a - b);
   }
 }

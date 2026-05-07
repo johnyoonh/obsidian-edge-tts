@@ -38,6 +38,9 @@ interface FloatingPlayerUIProps {
   onReplay?: () => void;
   onJumpForward?: () => void;
   onJumpBackward?: () => void;
+  playbackSpeed?: number;
+  playbackSpeedOptions?: number[];
+  onPlaybackSpeedChange?: (speed: number) => void | Promise<void>;
   isLoading?: boolean;
   queueInfo?: { currentIndex: number; totalItems: number; currentTitle?: string; isPlayingFromQueue: boolean };
   onToggleQueue?: () => void;
@@ -59,6 +62,9 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
   onReplay,
   onJumpForward,
   onJumpBackward,
+  playbackSpeed = 1,
+  playbackSpeedOptions = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2],
+  onPlaybackSpeedChange,
   isLoading = false,
   queueInfo,
   onToggleQueue,
@@ -66,8 +72,10 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
 }) => {
   const [position, setPosition] = useState(initialPosition);
   const [isDragging, setIsDragging] = useState(false);
+  const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
   const dragStartOffset = useRef({ x: 0, y: 0 });
   const playerRef = useRef<HTMLDivElement>(null);
+  const speedOptions = playbackSpeedOptions.length > 0 ? playbackSpeedOptions : [1];
 
   // Helper function to get coordinates from either mouse or touch event
   const getEventCoordinates = useCallback((e: MouseEvent | TouchEvent) => {
@@ -84,7 +92,7 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
   const handlePointerDown = useCallback((e: React.MouseEvent<HTMLDivElement, MouseEvent> | React.TouchEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     // Prevent dragging if the click is on a button, the slider, or the close button itself
-    if (target.closest('button') || target.closest('.seek-slider') || target.classList.contains('floating-player-close-button-icon')) {
+    if (target.closest('button') || target.closest('.seek-slider') || target.closest('.playback-speed-control') || target.classList.contains('floating-player-close-button-icon')) {
       return;
     }
 
@@ -148,6 +156,13 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
   const handleSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (onSeek) {
       onSeek(parseFloat(event.target.value));
+    }
+  };
+
+  const handleSpeedChange = async (speed: number) => {
+    setIsSpeedMenuOpen(false);
+    if (onPlaybackSpeedChange) {
+      await onPlaybackSpeedChange(speed);
     }
   };
 
@@ -290,6 +305,36 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
                     <ObsidianIcon icon="rotate-cw" />
                   </div>
                 )}
+                {!isReplayState && onPlaybackSpeedChange && (
+                  <div className="playback-speed-control">
+                    <button
+                      type="button"
+                      className="player-control-button playback-speed-button"
+                      onClick={() => setIsSpeedMenuOpen(!isSpeedMenuOpen)}
+                      aria-label="Change playback speed"
+                      aria-haspopup="menu"
+                      aria-expanded={isSpeedMenuOpen}
+                    >
+                      {playbackSpeed.toFixed(playbackSpeed % 1 === 0 ? 0 : 2).replace(/\.?0+$/u, '')}x
+                    </button>
+                    {isSpeedMenuOpen && (
+                      <div className="playback-speed-menu" role="menu">
+                        {speedOptions.map(speed => (
+                          <button
+                            key={speed}
+                            type="button"
+                            className={Math.abs(speed - playbackSpeed) < 0.01 ? 'is-active' : ''}
+                            onClick={() => handleSpeedChange(speed)}
+                            role="menuitemradio"
+                            aria-checked={Math.abs(speed - playbackSpeed) < 0.01}
+                          >
+                            {speed.toFixed(speed % 1 === 0 ? 0 : 2).replace(/\.?0+$/u, '')}x
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -297,4 +342,4 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
       </div>
     </div>
   );
-}; 
+};

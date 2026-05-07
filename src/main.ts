@@ -70,6 +70,12 @@ export default class EdgeTTSPlugin extends Plugin {
 				this.settings.floatingPlayerPosition = position;
 				await this.saveSettings();
 			},
+			getPlaybackSpeed: () => this.settings.playbackSpeed,
+			getPlaybackSpeedOptions: () => this.settings.playbackSpeedOptions,
+			setPlaybackSpeedCallback: async (speed) => {
+				this.settings.playbackSpeed = speed;
+				await this.saveSettings();
+			},
 			enableQueueFeature: this.settings.enableQueueFeature
 		});
 
