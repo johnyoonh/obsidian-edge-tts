@@ -75,6 +75,7 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
   const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
   const dragStartOffset = useRef({ x: 0, y: 0 });
   const playerRef = useRef<HTMLDivElement>(null);
+  const speedControlRef = useRef<HTMLDivElement>(null);
   const speedOptions = playbackSpeedOptions.length > 0 ? playbackSpeedOptions : [1];
 
   // Helper function to get coordinates from either mouse or touch event
@@ -152,6 +153,36 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
   useEffect(() => {
     setPosition(initialPosition);
   }, [initialPosition]);
+
+  useEffect(() => {
+    if (!isSpeedMenuOpen) return;
+
+    const closeOnOutsideInteraction = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (speedControlRef.current?.contains(target)) return;
+
+      setIsSpeedMenuOpen(false);
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsSpeedMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', closeOnOutsideInteraction);
+    document.addEventListener('touchstart', closeOnOutsideInteraction);
+    document.addEventListener('focusin', closeOnOutsideInteraction);
+    document.addEventListener('keydown', closeOnEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideInteraction);
+      document.removeEventListener('touchstart', closeOnOutsideInteraction);
+      document.removeEventListener('focusin', closeOnOutsideInteraction);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [isSpeedMenuOpen]);
 
   const handleSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (onSeek) {
@@ -306,7 +337,7 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
                   </div>
                 )}
                 {!isReplayState && onPlaybackSpeedChange && (
-                  <div className="playback-speed-control">
+                  <div className="playback-speed-control" ref={speedControlRef}>
                     <button
                       type="button"
                       className="player-control-button playback-speed-button"

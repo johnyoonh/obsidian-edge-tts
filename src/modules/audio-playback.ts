@@ -98,6 +98,8 @@ export class AudioPlaybackManager {
   // iOS native speech fallback. Obsidian iOS cannot use Node/Electron WebSocket APIs.
   private nativeSpeechUtterance: SpeechSynthesisUtterance | null = null;
   private nativeSpeechText = '';
+  private nativeSpeechEstimatedDuration = 0;
+  private nativeSpeechElapsedTime = 0;
   private isNativeSpeechActive = false;
   private nativeSpeechFinished = false;
 
@@ -594,6 +596,8 @@ export class AudioPlaybackManager {
       const utterance = new SpeechSynthesisUtterance(cleanText);
 
       this.nativeSpeechText = cleanText;
+      this.nativeSpeechEstimatedDuration = this.estimateNativeSpeechDuration(cleanText);
+      this.nativeSpeechElapsedTime = 0;
       this.nativeSpeechUtterance = utterance;
       this.isNativeSpeechActive = true;
       this.nativeSpeechFinished = false;
@@ -625,23 +629,34 @@ export class AudioPlaybackManager {
         if (this.currentPlaybackId !== activePlaybackAttemptId) return;
         this.isPaused = false;
         this.isNativeSpeechActive = true;
-        emitNativeState(true);
+        emitNativeState(true, this.nativeSpeechElapsedTime, this.nativeSpeechEstimatedDuration);
       };
 
-      utterance.onpause = () => {
+      utterance.onpause = (event) => {
         if (this.currentPlaybackId !== activePlaybackAttemptId) return;
         this.isPaused = true;
-        emitNativeState(false);
+        this.updateNativeSpeechElapsedTime(event);
+        emitNativeState(false, this.nativeSpeechElapsedTime, this.nativeSpeechEstimatedDuration);
       };
 
-      utterance.onresume = () => {
+      utterance.onresume = (event) => {
         if (this.currentPlaybackId !== activePlaybackAttemptId) return;
         this.isPaused = false;
-        emitNativeState(true);
+        this.updateNativeSpeechElapsedTime(event);
+        emitNativeState(true, this.nativeSpeechElapsedTime, this.nativeSpeechEstimatedDuration);
       };
 
       utterance.onboundary = (event) => {
         if (this.currentPlaybackId !== activePlaybackAttemptId) return;
+        this.updateNativeSpeechElapsedTime(event);
+        if (!this.settings.disablePlaybackControlPopover) {
+          this.emitProgressFloatingPlayerState({
+            currentTime: this.nativeSpeechElapsedTime,
+            duration: this.nativeSpeechEstimatedDuration,
+            isPlaying: true,
+            isLoading: false,
+          });
+        }
         this.updateNativeSpeechHighlight(event);
       };
 
@@ -683,8 +698,8 @@ export class AudioPlaybackManager {
         if (this.settings.enableReplayOption && !this.settings.disablePlaybackControlPopover) {
           this.updateStatusBarCallback(false);
           this.emitFloatingPlayerState({
-            currentTime: 1,
-            duration: 1,
+            currentTime: this.nativeSpeechEstimatedDuration,
+            duration: this.nativeSpeechEstimatedDuration,
             isPlaying: false,
             isLoading: false,
           }, true);
@@ -726,6 +741,21 @@ export class AudioPlaybackManager {
     } catch {
       return 'en-US';
     }
+  }
+
+  private estimateNativeSpeechDuration(text: string): number {
+    const wordCount = text.trim().split(/\s+/u).filter(Boolean).length;
+    if (wordCount === 0) return 1;
+
+    const wordsPerMinute = 180 * this.normalizePlaybackSpeed(this.settings.playbackSpeed);
+    return Math.max(1, (wordCount / wordsPerMinute) * 60);
+  }
+
+  private updateNativeSpeechElapsedTime(event: SpeechSynthesisEvent): void {
+    const elapsedTime = Number(event.elapsedTime);
+    if (!Number.isFinite(elapsedTime) || elapsedTime < 0) return;
+
+    this.nativeSpeechElapsedTime = Math.min(elapsedTime, this.nativeSpeechEstimatedDuration);
   }
 
   private selectNativeSpeechVoice(): SpeechSynthesisVoice | null {
@@ -1468,6 +1498,8 @@ export class AudioPlaybackManager {
     this.nativeSpeechFinished = false;
     if (clearReplayText) {
       this.nativeSpeechText = '';
+      this.nativeSpeechEstimatedDuration = 0;
+      this.nativeSpeechElapsedTime = 0;
     }
   }
 
