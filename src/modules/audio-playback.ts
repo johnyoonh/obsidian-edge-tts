@@ -22,6 +22,31 @@ type FloatingPlayerState = {
   isLoading: boolean;
 };
 
+type NativeSpeechHighlightRange = {
+  from: EditorPosition;
+  to: EditorPosition;
+  rangeKey: string;
+};
+
+type NativeSpeechWordRange = {
+  start: number;
+  end: number;
+  text: string;
+};
+
+type CachedWordBoundary = {
+  startTime: number;
+  endTime: number;
+  text: string;
+};
+
+type CachedEdgeAudio = {
+  buffer: Uint8Array;
+  byteLength: number;
+  wordBoundaries: CachedWordBoundary[];
+  lastUsed: number;
+};
+
 export type PlaybackHighlightSource = {
   text: string;
   offsetToEditorPos: (offset: number) => EditorPosition;
@@ -33,6 +58,8 @@ export type PlaybackHighlightSource = {
 export class AudioPlaybackManager {
   private static readonly FLOATING_PLAYER_PROGRESS_UPDATE_MS = 250;
   private static readonly TEXT_HIGHLIGHT_UPDATE_MS = 100;
+  private static readonly EDGE_AUDIO_CACHE_MAX_ENTRIES = 3;
+  private static readonly EDGE_AUDIO_CACHE_MAX_BYTES = 50 * 1024 * 1024;
 
   private audioElement: HTMLAudioElement;
   private app: App;
@@ -69,6 +96,8 @@ export class AudioPlaybackManager {
   private isStreamingWithMSE = false;
   private isSwitchingToFullFile = false;
   private streamedPlaybackTimeBeforeSwitch = 0;
+  private edgeAudioCache = new Map<string, CachedEdgeAudio>();
+  private currentEdgeAudioCacheKey: string | null = null;
 
   // Queue change notification callback
   private queueChangeCallback?: () => void;
@@ -98,10 +127,13 @@ export class AudioPlaybackManager {
   // iOS native speech fallback. Obsidian iOS cannot use Node/Electron WebSocket APIs.
   private nativeSpeechUtterance: SpeechSynthesisUtterance | null = null;
   private nativeSpeechText = '';
+  private nativeSpeechSegmentStartOffset = 0;
+  private nativeSpeechSegmentBaseTime = 0;
   private nativeSpeechEstimatedDuration = 0;
   private nativeSpeechElapsedTime = 0;
   private isNativeSpeechActive = false;
   private nativeSpeechFinished = false;
+  private nativeSpeechCurrentHighlight: NativeSpeechHighlightRange | null = null;
 
   constructor(
     settings: EdgeTTSPluginSettings,
@@ -590,18 +622,50 @@ export class AudioPlaybackManager {
       typeof SpeechSynthesisUtterance !== 'undefined';
   }
 
-  private startNativeSpeechPlayback(cleanText: string, activePlaybackAttemptId: number): Promise<void> {
+  private startNativeSpeechPlayback(
+    cleanText: string,
+    activePlaybackAttemptId: number,
+    startOffset = 0,
+    baseElapsedTime = 0,
+    pauseOnStart = false
+  ): Promise<void> {
     return new Promise((resolve) => {
       const speechSynthesis = window.speechSynthesis;
-      const utterance = new SpeechSynthesisUtterance(cleanText);
+      const segmentStartOffset = this.normalizeNativeSpeechStartOffset(cleanText, startOffset);
+      const segmentText = cleanText.slice(segmentStartOffset);
+
+      if (!segmentText.trim()) {
+        this.nativeSpeechText = cleanText;
+        this.nativeSpeechSegmentStartOffset = segmentStartOffset;
+        this.nativeSpeechSegmentBaseTime = this.nativeSpeechEstimatedDuration || this.estimateNativeSpeechDuration(cleanText);
+        this.nativeSpeechElapsedTime = this.nativeSpeechSegmentBaseTime;
+        this.isNativeSpeechActive = false;
+        this.nativeSpeechFinished = true;
+        this.isPaused = true;
+        if (!this.settings.disablePlaybackControlPopover) {
+          this.emitFloatingPlayerState({
+            currentTime: this.nativeSpeechElapsedTime,
+            duration: this.nativeSpeechElapsedTime,
+            isPlaying: false,
+            isLoading: false,
+          }, true);
+        }
+        resolve();
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(segmentText);
 
       this.nativeSpeechText = cleanText;
       this.nativeSpeechEstimatedDuration = this.estimateNativeSpeechDuration(cleanText);
-      this.nativeSpeechElapsedTime = 0;
+      this.nativeSpeechSegmentStartOffset = segmentStartOffset;
+      this.nativeSpeechSegmentBaseTime = Math.max(0, Math.min(baseElapsedTime, this.nativeSpeechEstimatedDuration));
+      this.nativeSpeechElapsedTime = this.nativeSpeechSegmentBaseTime;
       this.nativeSpeechUtterance = utterance;
       this.isNativeSpeechActive = true;
       this.nativeSpeechFinished = false;
-      this.isPaused = false;
+      this.nativeSpeechCurrentHighlight = null;
+      this.isPaused = pauseOnStart;
 
       const nativeVoice = this.selectNativeSpeechVoice();
       if (nativeVoice) {
@@ -627,6 +691,16 @@ export class AudioPlaybackManager {
 
       utterance.onstart = () => {
         if (this.currentPlaybackId !== activePlaybackAttemptId) return;
+        if (pauseOnStart) {
+          try {
+            speechSynthesis.pause();
+          } catch (error) {
+            console.error('Error pausing native speech after seek:', error);
+          }
+          this.isPaused = true;
+          emitNativeState(false, this.nativeSpeechElapsedTime, this.nativeSpeechEstimatedDuration);
+          return;
+        }
         this.isPaused = false;
         this.isNativeSpeechActive = true;
         emitNativeState(true, this.nativeSpeechElapsedTime, this.nativeSpeechEstimatedDuration);
@@ -743,6 +817,14 @@ export class AudioPlaybackManager {
     }
   }
 
+  private normalizeNativeSpeechStartOffset(text: string, offset: number): number {
+    if (!text.trim()) return 0;
+
+    const boundedOffset = Math.max(0, Math.min(Math.floor(offset), text.length - 1));
+    const word = this.findNativeSpeechWordAtOrAfterOffset(text, boundedOffset);
+    return word?.start ?? 0;
+  }
+
   private estimateNativeSpeechDuration(text: string): number {
     const wordCount = text.trim().split(/\s+/u).filter(Boolean).length;
     if (wordCount === 0) return 1;
@@ -755,7 +837,10 @@ export class AudioPlaybackManager {
     const elapsedTime = Number(event.elapsedTime);
     if (!Number.isFinite(elapsedTime) || elapsedTime < 0) return;
 
-    this.nativeSpeechElapsedTime = Math.min(elapsedTime, this.nativeSpeechEstimatedDuration);
+    this.nativeSpeechElapsedTime = Math.min(
+      this.nativeSpeechSegmentBaseTime + elapsedTime,
+      this.nativeSpeechEstimatedDuration
+    );
   }
 
   private selectNativeSpeechVoice(): SpeechSynthesisVoice | null {
@@ -775,34 +860,95 @@ export class AudioPlaybackManager {
   private updateNativeSpeechHighlight(event: SpeechSynthesisEvent): void {
     if (!this.activeEditor || typeof event.charIndex !== 'number') return;
 
+    const wordOffset = this.nativeSpeechSegmentStartOffset + event.charIndex;
+    this.revealNativeSpeechOffset(wordOffset);
+  }
+
+  private getNativeSpeechWords(text = this.nativeSpeechText): NativeSpeechWordRange[] {
+    return Array.from(text.matchAll(/\S+/gu))
+      .map(match => ({
+        start: match.index ?? 0,
+        end: (match.index ?? 0) + match[0].length,
+        text: match[0],
+      }));
+  }
+
+  private findNativeSpeechWordAtOrAfterOffset(text: string, offset: number): NativeSpeechWordRange | null {
+    const words = this.getNativeSpeechWords(text);
+    if (words.length === 0) return null;
+
+    const boundedOffset = Math.max(0, Math.min(Math.floor(offset), text.length - 1));
+    return words.find(word => boundedOffset <= word.end) ?? words[words.length - 1];
+  }
+
+  private getNativeSpeechOffsetForElapsedTime(time: number): number {
+    const words = this.getNativeSpeechWords();
+    if (words.length === 0) return 0;
+
+    const duration = this.nativeSpeechEstimatedDuration || this.estimateNativeSpeechDuration(this.nativeSpeechText);
+    const ratio = duration > 0 ? Math.max(0, Math.min(time / duration, 1)) : 0;
+    const wordIndex = Math.max(0, Math.min(Math.floor(ratio * words.length), words.length - 1));
+    return words[wordIndex].start;
+  }
+
+  private estimateEditorOffsetFromNativeSpeechOffset(nativeOffset: number): number {
     this.ensureHighlightText();
+    if (!this.editorContent) return 0;
 
-    const spokenText = this.nativeSpeechText;
-    const wordStart = event.charIndex;
-    if (wordStart < 0 || wordStart >= spokenText.length) return;
+    const ratio = this.nativeSpeechText.length > 0
+      ? Math.max(0, Math.min(nativeOffset / this.nativeSpeechText.length, 1))
+      : 0;
+    return Math.max(0, Math.min(Math.floor(this.editorContent.length * ratio), this.editorContent.length));
+  }
 
-    let wordEnd = wordStart;
-    while (wordEnd < spokenText.length && !/\s/.test(spokenText[wordEnd])) {
-      wordEnd++;
-    }
+  private findNativeSpeechEditorOffset(word: NativeSpeechWordRange): number {
+    this.ensureHighlightText();
+    if (!this.editorContent) return -1;
 
-    const wordText = spokenText.slice(wordStart, wordEnd).trim();
-    if (!wordText) return;
+    const directPos = this.editorContent.indexOf(word.text, this.searchOffset);
+    if (directPos !== -1) return directPos;
 
-    const pos = this.editorContent.indexOf(wordText, this.searchOffset);
-    if (pos === -1) return;
+    const estimatedOffset = this.estimateEditorOffsetFromNativeSpeechOffset(word.start);
+    const afterPos = this.editorContent.indexOf(word.text, estimatedOffset);
+    const beforePos = this.editorContent.lastIndexOf(word.text, estimatedOffset);
+
+    if (afterPos === -1) return beforePos;
+    if (beforePos === -1) return afterPos;
+
+    return Math.abs(afterPos - estimatedOffset) < Math.abs(estimatedOffset - beforePos)
+      ? afterPos
+      : beforePos;
+  }
+
+  private revealNativeSpeechOffset(nativeOffset: number, forceScroll = false): boolean {
+    if (!this.activeEditor || !this.nativeSpeechText) return false;
+
+    const word = this.findNativeSpeechWordAtOrAfterOffset(this.nativeSpeechText, nativeOffset);
+    if (!word) return false;
+
+    const pos = this.findNativeSpeechEditorOffset(word);
+    if (pos === -1) return false;
 
     const from = this.offsetToEditorPos(pos);
-    const to = this.offsetToEditorPos(pos + wordText.length);
+    const to = this.offsetToEditorPos(pos + word.text.length);
     const rangeKey = `${from.line}:${from.ch}-${to.line}:${to.ch}`;
-    if (rangeKey === this.currentHighlightRangeKey) return;
+    const range = { from, to, rangeKey };
+    this.nativeSpeechCurrentHighlight = range;
+    this.searchOffset = pos + word.text.length;
+
+    return this.revealNativeSpeechRange(range, forceScroll);
+  }
+
+  private revealNativeSpeechRange(range: NativeSpeechHighlightRange, forceScroll = false): boolean {
+    if (!this.activeEditor) return false;
+    if (!forceScroll && range.rangeKey === this.currentHighlightRangeKey) return true;
 
     try {
-      this.highlightEditorRange(from, to);
-      this.currentHighlightRangeKey = rangeKey;
-      this.searchOffset = pos + wordText.length;
+      this.highlightEditorRange(range.from, range.to);
+      this.currentHighlightRangeKey = range.rangeKey;
+      return true;
     } catch {
-      // Editor position may be invalid if document changed.
+      return false;
     }
   }
 
@@ -879,6 +1025,8 @@ export class AudioPlaybackManager {
       }
     }
     cleanText = truncationResult.content;
+    const edgeAudioCacheKey = this.getEdgeAudioCacheKey(cleanText, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+    this.currentEdgeAudioCacheKey = edgeAudioCacheKey;
 
     if (Platform.isIosApp) {
       if (!this.shouldUseNativeSpeech()) {
@@ -888,6 +1036,15 @@ export class AudioPlaybackManager {
         return;
       }
       await this.startNativeSpeechPlayback(cleanText, activePlaybackAttemptId);
+      return;
+    }
+
+    const cachedAudio = this.getCachedEdgeAudio(edgeAudioCacheKey);
+    if (cachedAudio) {
+      this.isStreamingWithMSE = false;
+      this.populateHighlightWordsFromCachedBoundaries(cachedAudio.wordBoundaries);
+      if (shouldShowNotices(this.settings)) new Notice('Using cached audio...');
+      this.playCompleteAudioBuffer(cachedAudio.buffer, activePlaybackAttemptId);
       return;
     }
 
@@ -1068,6 +1225,119 @@ export class AudioPlaybackManager {
     }
   }
 
+  private getEdgeAudioCacheKey(cleanText: string, outputFormat: string): string {
+    const voiceToUse = this.settings.customVoice.trim() || this.settings.selectedVoice;
+    const speed = this.normalizePlaybackSpeed(this.settings.playbackSpeed);
+    return [
+      voiceToUse,
+      outputFormat,
+      speed,
+      cleanText.length,
+      this.hashString(cleanText),
+    ].join('|');
+  }
+
+  private hashString(value: string): string {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  private getCachedEdgeAudio(cacheKey: string): CachedEdgeAudio | null {
+    const cached = this.edgeAudioCache.get(cacheKey);
+    if (!cached) return null;
+
+    cached.lastUsed = Date.now();
+    return cached;
+  }
+
+  private concatenateAudioChunks(chunks: Uint8Array[]): Uint8Array {
+    const totalLength = chunks.reduce((sum, arr) => sum + arr.length, 0);
+    const concatenated = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const arr of chunks) {
+      concatenated.set(arr, offset);
+      offset += arr.length;
+    }
+    return concatenated;
+  }
+
+  private cacheCurrentEdgeAudio(): void {
+    if (!this.currentEdgeAudioCacheKey || this.completeMp3BufferArray.length === 0) return;
+
+    const buffer = this.concatenateAudioChunks(this.completeMp3BufferArray);
+    if (buffer.byteLength > AudioPlaybackManager.EDGE_AUDIO_CACHE_MAX_BYTES) return;
+
+    const wordBoundaries = this.highlightWords.map(({ startTime, endTime, text }) => ({
+      startTime,
+      endTime,
+      text,
+    }));
+
+    this.edgeAudioCache.set(this.currentEdgeAudioCacheKey, {
+      buffer,
+      byteLength: buffer.byteLength,
+      wordBoundaries,
+      lastUsed: Date.now(),
+    });
+    this.evictEdgeAudioCache();
+  }
+
+  private evictEdgeAudioCache(): void {
+    let totalBytes = Array.from(this.edgeAudioCache.values())
+      .reduce((sum, entry) => sum + entry.byteLength, 0);
+
+    while (
+      this.edgeAudioCache.size > AudioPlaybackManager.EDGE_AUDIO_CACHE_MAX_ENTRIES ||
+      totalBytes > AudioPlaybackManager.EDGE_AUDIO_CACHE_MAX_BYTES
+    ) {
+      const oldest = Array.from(this.edgeAudioCache.entries())
+        .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+      if (!oldest) return;
+
+      this.edgeAudioCache.delete(oldest[0]);
+      totalBytes -= oldest[1].byteLength;
+    }
+  }
+
+  private populateHighlightWordsFromCachedBoundaries(boundaries: CachedWordBoundary[]): void {
+    if (!this.activeEditor || boundaries.length === 0) return;
+
+    this.ensureHighlightText();
+    this.highlightWords = [];
+
+    for (const boundary of boundaries) {
+      const pos = this.editorContent.indexOf(boundary.text, this.searchOffset);
+      let from: EditorPosition | undefined;
+      let to: EditorPosition | undefined;
+
+      if (pos !== -1) {
+        from = this.offsetToEditorPos(pos);
+        to = this.offsetToEditorPos(pos + boundary.text.length);
+        this.searchOffset = pos + boundary.text.length;
+      }
+
+      this.highlightWords.push({ ...boundary, from, to });
+    }
+  }
+
+  private playCompleteAudioBuffer(buffer: Buffer | Uint8Array, activePlaybackAttemptId: number): void {
+    this.updateStatusBarCallback(true);
+    if (!this.settings.disablePlaybackControlPopover) {
+      this.updateFloatingPlayerCallback({
+        currentTime: 0,
+        duration: 0,
+        isPlaying: false,
+        isLoading: true,
+      });
+    }
+
+    this.fallbackToBlobPlayback(buffer, activePlaybackAttemptId);
+  }
+
   /**
    * Finish MSE playback
    */
@@ -1114,6 +1384,8 @@ export class AudioPlaybackManager {
       this.isStreamingWithMSE = false;
       return;
     }
+
+    this.cacheCurrentEdgeAudio();
 
     if (this.settings.enableReplayOption) {
       this.scheduleReplayTempFileSave(this.completeMp3BufferArray, activePlaybackAttemptId);
@@ -1187,20 +1459,14 @@ export class AudioPlaybackManager {
 
       if (Platform.isMobile || typeof Buffer === 'undefined') {
         // Mobile environment - manual concatenation to Uint8Array
-        const totalLength = this.completeMp3BufferArray.reduce((sum, arr) => sum + arr.length, 0);
-        const concatenated = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const arr of this.completeMp3BufferArray) {
-          concatenated.set(arr, offset);
-          offset += arr.length;
-        }
-        completeBuffer = concatenated;
+        completeBuffer = this.concatenateAudioChunks(this.completeMp3BufferArray);
       } else {
         // Desktop environment - use Buffer.concat
         completeBuffer = Buffer.concat(this.completeMp3BufferArray);
       }
 
       if (this.currentPlaybackId !== activePlaybackAttemptId) return;
+      this.cacheCurrentEdgeAudio();
 
       // Try to save as temp file first (works better for mobile)
       const tempFilePath = await this.fileManager.saveTempAudioFile(completeBuffer);
@@ -1366,7 +1632,12 @@ export class AudioPlaybackManager {
       }
       this.isPaused = true;
       if (!this.settings.disablePlaybackControlPopover) {
-        this.emitFloatingPlayerState({ currentTime: 0, duration: 0, isPlaying: false, isLoading: false }, true);
+        this.emitFloatingPlayerState({
+          currentTime: this.nativeSpeechElapsedTime,
+          duration: this.nativeSpeechEstimatedDuration,
+          isPlaying: false,
+          isLoading: false,
+        }, true);
       }
       this.updateStatusBarCallback(true);
       this.notifyQueueUIUpdate();
@@ -1383,6 +1654,7 @@ export class AudioPlaybackManager {
    */
   resumePlayback(): void {
     if (this.isNativeSpeechActive && this.isPaused) {
+      this.revealCurrentHighlight();
       try {
         window.speechSynthesis.resume();
       } catch (error) {
@@ -1390,7 +1662,12 @@ export class AudioPlaybackManager {
       }
       this.isPaused = false;
       if (!this.settings.disablePlaybackControlPopover) {
-        this.emitFloatingPlayerState({ currentTime: 0, duration: 0, isPlaying: true, isLoading: false }, true);
+        this.emitFloatingPlayerState({
+          currentTime: this.nativeSpeechElapsedTime,
+          duration: this.nativeSpeechEstimatedDuration,
+          isPlaying: true,
+          isLoading: false,
+        }, true);
       }
       this.updateStatusBarCallback(true);
       this.notifyQueueUIUpdate();
@@ -1483,6 +1760,11 @@ export class AudioPlaybackManager {
   private stopNativeSpeechInternal(clearReplayText: boolean): void {
     if (!this.isNativeSpeechActive && !this.nativeSpeechUtterance && !this.nativeSpeechFinished) {
       if (clearReplayText) this.nativeSpeechText = '';
+      if (clearReplayText) {
+        this.nativeSpeechSegmentStartOffset = 0;
+        this.nativeSpeechSegmentBaseTime = 0;
+        this.nativeSpeechCurrentHighlight = null;
+      }
       return;
     }
 
@@ -1499,9 +1781,36 @@ export class AudioPlaybackManager {
     this.nativeSpeechFinished = false;
     if (clearReplayText) {
       this.nativeSpeechText = '';
+      this.nativeSpeechSegmentStartOffset = 0;
+      this.nativeSpeechSegmentBaseTime = 0;
       this.nativeSpeechEstimatedDuration = 0;
       this.nativeSpeechElapsedTime = 0;
+      this.nativeSpeechCurrentHighlight = null;
     }
+  }
+
+  private seekNativeSpeech(time: number): void {
+    if (!this.nativeSpeechText) return;
+
+    const duration = this.nativeSpeechEstimatedDuration || this.estimateNativeSpeechDuration(this.nativeSpeechText);
+    const targetTime = Math.max(0, Math.min(time, duration));
+    const targetOffset = this.getNativeSpeechOffsetForElapsedTime(targetTime);
+    const wasPaused = this.isPaused;
+    const activePlaybackAttemptId = ++this.currentPlaybackId;
+
+    this.stopNativeSpeechInternal(false);
+    this.nativeSpeechElapsedTime = targetTime;
+    this.nativeSpeechFinished = false;
+    this.isPaused = wasPaused;
+    this.revealNativeSpeechOffset(targetOffset, true);
+
+    void this.startNativeSpeechPlayback(
+      this.nativeSpeechText,
+      activePlaybackAttemptId,
+      targetOffset,
+      targetTime,
+      wasPaused
+    );
   }
 
   /**
@@ -1556,6 +1865,7 @@ export class AudioPlaybackManager {
    */
   jumpForward(seconds = 10): void {
     if (this.isNativeSpeechActive || this.nativeSpeechFinished) {
+      this.seekNativeSpeech(this.nativeSpeechElapsedTime + seconds);
       return;
     }
 
@@ -1571,6 +1881,7 @@ export class AudioPlaybackManager {
    */
   jumpBackward(seconds = 10): void {
     if (this.isNativeSpeechActive || this.nativeSpeechFinished) {
+      this.seekNativeSpeech(this.nativeSpeechElapsedTime - seconds);
       return;
     }
 
@@ -1598,7 +1909,19 @@ export class AudioPlaybackManager {
   }
 
   public revealCurrentHighlight(): boolean {
-    if (!this.activeEditor || this.highlightWords.length === 0) return false;
+    if (!this.activeEditor) return false;
+
+    if (this.isNativeSpeechActive || this.nativeSpeechFinished || this.nativeSpeechText) {
+      if (this.nativeSpeechCurrentHighlight) {
+        return this.revealNativeSpeechRange(this.nativeSpeechCurrentHighlight, true);
+      }
+      return this.revealNativeSpeechOffset(
+        this.getNativeSpeechOffsetForElapsedTime(this.nativeSpeechElapsedTime),
+        true
+      );
+    }
+
+    if (this.highlightWords.length === 0) return false;
 
     const currentTime = this.audioElement.currentTime;
     const currentIndex = this.findCurrentHighlightIndex(currentTime);
@@ -1721,6 +2044,10 @@ export class AudioPlaybackManager {
     this.initializeMediaSession();
   }
 
+  clearEdgeAudioCache(): void {
+    this.edgeAudioCache.clear();
+  }
+
   private normalizePlaybackSpeed(speed: number): number {
     return Math.max(0.5, Math.min(2, Number.isFinite(speed) ? speed : 1));
   }
@@ -1762,6 +2089,7 @@ export class AudioPlaybackManager {
    */
   seekPlayback(time: number): void {
     if (this.isNativeSpeechActive || this.nativeSpeechFinished) {
+      this.seekNativeSpeech(time);
       return;
     }
 

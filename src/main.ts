@@ -1062,6 +1062,7 @@ export default class EdgeTTSPlugin extends Plugin {
 		console.log('Unloading Obsidian Edge TTS Plugin');
 		this.uiManager.removePluginRibbonIcon();
 		this.audioManager.stopPlayback(); // This will also trigger hidePlayer if popover is not disabled, which saves position
+		this.audioManager.clearEdgeAudioCache();
 		this.uiManager.removeStatusBarButton();
 
 		// Save positions one last time on unload
