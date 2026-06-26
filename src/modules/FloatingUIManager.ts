@@ -193,6 +193,7 @@ export class FloatingUIManager {
           onReplay: () => this.audioManager.replayPlayback(),
           onJumpForward: () => this.audioManager.jumpForward(),
           onJumpBackward: () => this.audioManager.jumpBackward(),
+          onRevealCurrentHighlight: () => this.audioManager.revealCurrentHighlight(),
           playbackSpeed: this.getPlaybackSpeed(),
           playbackSpeedOptions: this.getPlaybackSpeedOptions(),
           onPlaybackSpeedChange: async (speed: number) => {

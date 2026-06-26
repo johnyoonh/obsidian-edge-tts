@@ -9,7 +9,7 @@ import { FloatingUIManager } from './modules/FloatingUIManager';
 import { QueueUIManager } from './modules/QueueUIManager';
 import { ChunkedProgressManager } from './modules/ChunkedProgressManager';
 import { ChunkedGenerator } from './modules/chunked-generator';
-import { checkAndTruncateContent, shouldShowNotices } from './utils';
+import { checkAndTruncateContent, getTruncationLimitLabel, shouldShowNotices } from './utils';
 
 export default class EdgeTTSPlugin extends Plugin {
 	settings: EdgeTTSPluginSettings;
@@ -378,8 +378,7 @@ export default class EdgeTTSPlugin extends Plugin {
 						const truncationResult = checkAndTruncateContent(selectedText);
 
 						if (truncationResult.wasTruncated) {
-							const limitType = truncationResult.truncationReason === 'words' ? 'word' : 'character';
-							const limitValue = truncationResult.truncationReason === 'words' ? '5,000 words' : '30,000 characters';
+							const limitValue = getTruncationLimitLabel(truncationResult.truncationReason ?? 'words');
 
 							if (this.settings.showNotices) {
 								new Notice(
@@ -558,8 +557,7 @@ export default class EdgeTTSPlugin extends Plugin {
 		const truncationResult = checkAndTruncateContent(selectedText);
 
 		if (truncationResult.wasTruncated) {
-			const limitType = truncationResult.truncationReason === 'words' ? 'word' : 'character';
-			const limitValue = truncationResult.truncationReason === 'words' ? '5,000 words' : '30,000 characters';
+			const limitValue = getTruncationLimitLabel(truncationResult.truncationReason ?? 'words');
 
 			if (this.settings.showNotices) {
 				new Notice(
@@ -613,7 +611,7 @@ export default class EdgeTTSPlugin extends Plugin {
 		const truncationResult = checkAndTruncateContent(sectionText);
 
 		if (truncationResult.wasTruncated && this.settings.showNotices) {
-			const limitValue = truncationResult.truncationReason === 'words' ? '5,000 words' : '30,000 characters';
+			const limitValue = getTruncationLimitLabel(truncationResult.truncationReason ?? 'words');
 			new Notice(
 				`Content exceeds playback limit (${limitValue}). ` +
 				`Playing first ${truncationResult.finalWordCount.toLocaleString()} words ` +
@@ -903,8 +901,7 @@ export default class EdgeTTSPlugin extends Plugin {
 		const truncationResult = checkAndTruncateContent(selectedText);
 
 		if (truncationResult.wasTruncated) {
-			const limitType = truncationResult.truncationReason === 'words' ? 'word' : 'character';
-			const limitValue = truncationResult.truncationReason === 'words' ? '5,000 words' : '30,000 characters';
+			const limitValue = getTruncationLimitLabel(truncationResult.truncationReason ?? 'words');
 
 			if (this.settings.showNotices) {
 				new Notice(

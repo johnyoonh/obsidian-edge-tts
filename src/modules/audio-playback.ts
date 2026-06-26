@@ -1,7 +1,7 @@
 import { EdgeTTSPluginSettings } from './settings';
 import { getLanguage, Notice, Platform, type Editor, type EditorPosition } from 'obsidian';
 import { UniversalTTSClient as EdgeTTSClient, OUTPUT_FORMAT, createProsodyOptions } from './tts-client-wrapper';
-import { filterFrontmatter, filterMarkdown, shouldShowNotices, checkAndTruncateContent, toArrayBuffer } from '../utils';
+import { filterFrontmatter, filterMarkdown, shouldShowNotices, checkAndTruncateContent, toArrayBuffer, getTruncationLimitLabel } from '../utils';
 import { ChunkedGenerator } from './chunked-generator';
 
 // Create a ProsodyOptions class that matches the old API
@@ -862,7 +862,7 @@ export class AudioPlaybackManager {
     // 3.4 Apply content limits and truncate if necessary
     const truncationResult = checkAndTruncateContent(cleanText);
     if (truncationResult.wasTruncated) {
-      const limitValue = truncationResult.truncationReason === 'words' ? '2,500 words' : '15,000 characters';
+      const limitValue = getTruncationLimitLabel(truncationResult.truncationReason ?? 'words');
 
       if (shouldShowNotices(this.settings)) {
         new Notice(
@@ -1398,6 +1398,7 @@ export class AudioPlaybackManager {
     }
 
     if (this.audioElement && this.audioElement.paused) {
+      this.revealCurrentHighlight();
       this.audioElement.play().catch(e => console.error("Error resuming playback:", e));
     }
   }
@@ -1558,8 +1559,9 @@ export class AudioPlaybackManager {
       return;
     }
 
-    if (this.audioElement && this.audioElement.duration > 0) {
-      const newTime = Math.min(this.audioElement.currentTime + seconds, this.audioElement.duration);
+    const seekBounds = this.getAudioSeekBounds();
+    if (seekBounds) {
+      const newTime = Math.min(this.audioElement.currentTime + seconds, seekBounds.end);
       this.seekPlayback(newTime);
     }
   }
@@ -1572,8 +1574,9 @@ export class AudioPlaybackManager {
       return;
     }
 
-    if (this.audioElement && this.audioElement.duration > 0) {
-      const newTime = Math.max(this.audioElement.currentTime - seconds, 0);
+    const seekBounds = this.getAudioSeekBounds();
+    if (seekBounds) {
+      const newTime = Math.max(this.audioElement.currentTime - seconds, seekBounds.start);
       this.seekPlayback(newTime);
     }
   }
@@ -1588,29 +1591,54 @@ export class AudioPlaybackManager {
     if (now - this.lastHighlightUpdate < AudioPlaybackManager.TEXT_HIGHLIGHT_UPDATE_MS) return;
     this.lastHighlightUpdate = now;
 
-    const currentTime = this.audioElement.currentTime;
+    const highlightIndex = this.findCurrentHighlightIndex(this.audioElement.currentTime);
+    if (highlightIndex !== -1) {
+      this.revealHighlightAtIndex(highlightIndex);
+    }
+  }
 
-    // Search forward from last highlight index
-    const startIndex = Math.max(0, this.lastHighlightIndex);
-    for (let i = startIndex; i < this.highlightWords.length; i++) {
+  public revealCurrentHighlight(): boolean {
+    if (!this.activeEditor || this.highlightWords.length === 0) return false;
+
+    const currentTime = this.audioElement.currentTime;
+    const currentIndex = this.findCurrentHighlightIndex(currentTime);
+    const highlightIndex = currentIndex !== -1
+      ? currentIndex
+      : this.findNearestRevealableHighlightIndex(currentTime);
+
+    return this.revealHighlightAtIndex(highlightIndex, true);
+  }
+
+  private findCurrentHighlightIndex(currentTime: number): number {
+    for (let i = 0; i < this.highlightWords.length; i++) {
       const word = this.highlightWords[i];
       if (currentTime >= word.startTime && currentTime < word.endTime) {
-        if (i !== this.lastHighlightIndex && word.from && word.to) {
-          const rangeKey = `${word.from.line}:${word.from.ch}-${word.to.line}:${word.to.ch}`;
-          if (rangeKey === this.currentHighlightRangeKey) return;
-
-          try {
-            this.highlightEditorRange(word.from, word.to);
-            this.currentHighlightRangeKey = rangeKey;
-          } catch {
-            // Editor position may be invalid if document changed
-          }
-          this.lastHighlightIndex = i;
-        }
-        return;
+        return i;
       }
-      if (word.startTime > currentTime + 1) return;
+      if (word.startTime > currentTime) break;
     }
+    return -1;
+  }
+
+  private findNearestRevealableHighlightIndex(currentTime: number): number {
+    let bestIndex = -1;
+    let bestDistance = Infinity;
+
+    for (let i = 0; i < this.highlightWords.length; i++) {
+      const word = this.highlightWords[i];
+      if (!word.from || !word.to) continue;
+
+      const distance = currentTime < word.startTime
+        ? word.startTime - currentTime
+        : Math.max(0, currentTime - word.endTime);
+
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = i;
+      }
+    }
+
+    return bestIndex;
   }
 
   /**
@@ -1637,6 +1665,27 @@ export class AudioPlaybackManager {
 
     this.activeEditor.setSelection(from, to);
     this.activeEditor.scrollIntoView({ from, to }, true);
+  }
+
+  private revealHighlightAtIndex(index: number, forceScroll = false): boolean {
+    if (index < 0 || index >= this.highlightWords.length) return false;
+
+    const word = this.highlightWords[index];
+    if (!word.from || !word.to) return false;
+
+    const rangeKey = `${word.from.line}:${word.from.ch}-${word.to.line}:${word.to.ch}`;
+    if (!forceScroll && rangeKey === this.currentHighlightRangeKey && index === this.lastHighlightIndex) {
+      return true;
+    }
+
+    try {
+      this.highlightEditorRange(word.from, word.to);
+      this.currentHighlightRangeKey = rangeKey;
+      this.lastHighlightIndex = index;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1676,6 +1725,37 @@ export class AudioPlaybackManager {
     return Math.max(0.5, Math.min(2, Number.isFinite(speed) ? speed : 1));
   }
 
+  private getAudioSeekBounds(): { start: number; end: number } | null {
+    const duration = this.audioElement.duration;
+    if (Number.isFinite(duration) && duration > 0) {
+      return { start: 0, end: duration };
+    }
+
+    const { seekable } = this.audioElement;
+    if (!seekable || seekable.length === 0) {
+      return null;
+    }
+
+    try {
+      const currentTime = this.audioElement.currentTime;
+      for (let i = 0; i < seekable.length; i++) {
+        const start = seekable.start(i);
+        const end = seekable.end(i);
+        if (currentTime >= start && currentTime <= end) {
+          return { start, end };
+        }
+      }
+
+      return {
+        start: seekable.start(0),
+        end: seekable.end(seekable.length - 1),
+      };
+    } catch (error) {
+      console.warn('Cannot read audio seekable range:', error);
+      return null;
+    }
+  }
+
   /**
    * Seek playback to a specific time
    * @param time Time in seconds to seek to
@@ -1685,14 +1765,22 @@ export class AudioPlaybackManager {
       return;
     }
 
-    if (this.audioElement && this.audioElement.seekable && this.audioElement.seekable.length > 0) {
-      const newTime = Math.max(0, Math.min(time, this.audioElement.duration));
-      if (isFinite(newTime) && isFinite(this.audioElement.duration) && this.audioElement.duration > 0) {
+    if (!Number.isFinite(time)) {
+      console.warn('Cannot seek: requested time is invalid.', { time });
+      return;
+    }
+
+    const seekBounds = this.getAudioSeekBounds();
+    if (seekBounds) {
+      const newTime = Math.max(seekBounds.start, Math.min(time, seekBounds.end));
+      if (Number.isFinite(newTime)) {
         this.audioElement.currentTime = newTime;
       } else {
         console.warn(
-          'Cannot seek: Audio duration is not yet available or is invalid.',
+          'Cannot seek: calculated seek time is invalid.',
           {
+            requestedTime: time,
+            seekBounds,
             currentTime: this.audioElement.currentTime,
             duration: this.audioElement.duration,
             readyState: this.audioElement.readyState,
@@ -1702,8 +1790,10 @@ export class AudioPlaybackManager {
       }
     } else {
       console.warn(
-        'Cannot seek: Audio element is not seekable or has no seekable ranges.',
+        'Cannot seek: audio duration is unavailable and there are no seekable ranges.',
         {
+          currentTime: this.audioElement.currentTime,
+          duration: this.audioElement.duration,
           readyState: this.audioElement.readyState,
           seekable: this.audioElement.seekable,
         }

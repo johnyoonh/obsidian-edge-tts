@@ -38,6 +38,7 @@ interface FloatingPlayerUIProps {
   onReplay?: () => void;
   onJumpForward?: () => void;
   onJumpBackward?: () => void;
+  onRevealCurrentHighlight?: () => void;
   playbackSpeed?: number;
   playbackSpeedOptions?: number[];
   onPlaybackSpeedChange?: (speed: number) => void | Promise<void>;
@@ -62,6 +63,7 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
   onReplay,
   onJumpForward,
   onJumpBackward,
+  onRevealCurrentHighlight,
   playbackSpeed = 1,
   playbackSpeedOptions = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2],
   onPlaybackSpeedChange,
@@ -213,6 +215,7 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
   const isEffectivelyPaused = isPaused;
   const isAtEnd = duration > 0 && currentTime >= duration - 0.1;
   const isReplayState = isEffectivelyPaused && isAtEnd && !!onReplay;
+  const hasKnownDuration = Number.isFinite(duration) && duration > 0;
 
   return (
     <div
@@ -277,11 +280,11 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
                 <input
                   type="range"
                   min="0"
-                  max={duration}
+                  max={hasKnownDuration ? duration : Math.max(currentTime, 1)}
                   value={currentTime}
                   onChange={handleSeek}
                   className="seek-slider"
-                  disabled={!onSeek || duration === 0 || isLoading}
+                  disabled={!onSeek || !hasKnownDuration || isLoading}
                   aria-label="Seek"
                 />
                 <span>{formatTime(duration)}</span>
@@ -308,7 +311,7 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
                     <ObsidianIcon icon="rotate-cw" />
                   </button>
                 )}
-                {!isReplayState && onJumpBackward && (duration != Infinity) && (
+                {!isReplayState && onJumpBackward && (
                   <div
                     onClick={onJumpBackward}
                     aria-label="Jump Backward 10s"
@@ -327,7 +330,7 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
                     <ObsidianIcon icon="pause" />
                   </button>
                 )}
-                {!isReplayState && onJumpForward && (duration != Infinity) && (
+                {!isReplayState && onJumpForward && (
                   <div
                     onClick={onJumpForward}
                     aria-label="Jump Forward 10s"
@@ -335,6 +338,17 @@ export const FloatingPlayerUI: React.FC<FloatingPlayerUIProps> = ({
                   >
                     <ObsidianIcon icon="rotate-cw" />
                   </div>
+                )}
+                {!isReplayState && onRevealCurrentHighlight && (
+                  <button
+                    type="button"
+                    onClick={onRevealCurrentHighlight}
+                    aria-label="Jump to Current Word"
+                    title="Jump to current word"
+                    className="player-control-button"
+                  >
+                    <ObsidianIcon icon="crosshair" />
+                  </button>
                 )}
                 {!isReplayState && onPlaybackSpeedChange && (
                   <div className="playback-speed-control" ref={speedControlRef}>
